@@ -20,7 +20,7 @@ Task: design an optimizer that trains a fixed vanilla self-attention model to ma
 
 ## scoring
 
-Official v0 scoring is wall-clock time on GitHub Actions `macos-15` arm64. The harness uses MPS when available and falls back to CPU. It stops at the first fixed evaluation checkpoint where held-out output MSE is at or below `target_mse`; submissions that miss the MSE target within `max_steps` fail.
+Official v0 scoring is wall-clock time on GitHub Actions `macos-15` arm64. The harness uses MPS when available and falls back to CPU. It stops at the first fixed evaluation checkpoint where the selected track's target metric is met; submissions that miss the target within that track's step budget fail.
 
 Run locally:
 
@@ -32,8 +32,45 @@ uv run python run_eval.py --submission submissions/adamw/submission.py --results
 
 ## dataset
 
-The harness deterministically initializes a teacher self-attention model, a student self-attention model, train inputs, eval inputs, and a fixed stochastic batch order from public seeds in `task.py`. Train and eval targets are teacher outputs on those inputs.
+Each track deterministically initializes its own model, train data, eval data, and fixed stochastic batch order from public config values in `tracks/`. For `random_teacher`, train and eval targets are teacher outputs on random matrix inputs. For token-recall tracks, targets are value classes from the generated key/value bindings.
 
-## model architecture
+## tracks
 
-Model: single-head vanilla self-attention via `torch.nn.MultiheadAttention`.
+The benchmark supports multiple tracks through `run_eval.py --track`:
+
+| Track | Objective | Target |
+| --- | --- | --- |
+| `random_teacher` | Student attention matches a deterministic random teacher attention model on random matrix inputs. | eval MSE <= `4e-7` |
+| `single_ar` | Opaque single-query associative recall: `8` pair tokens + `1` query token -> value class. | eval accuracy >= `0.99` |
+| `mqar` | Opaque multi-query associative recall: `8` pair tokens + `8` query tokens -> value classes. | eval accuracy >= `0.99` |
+
+`mqar` is inspired by the multi-query associative recall task from
+[Zoology: Measuring and Improving Recall in Efficient Language Models](https://arxiv.org/abs/2312.04927).
+
+All tracks keep the same optimizer contract: submissions define
+`Submission(torch.optim.Optimizer)`, and the harness instantiates it as
+`Submission(model.parameters())`.
+
+Run a specific track:
+
+```bash
+uv run python run_eval.py --track single_ar --submission submissions/adamw/submission.py
+uv run python run_eval.py --track mqar --submission submissions/adamw/submission.py
+```
+
+## track architecture
+
+Each benchmark track implements the `BenchmarkTrack` protocol in `tracks/base.py`.
+The runner asks the selected track for only the shared benchmark surface:
+student model construction, train/eval datasets, batch indices, loss,
+evaluation, target metrics, metric updates, `max_steps`, and `eval_every`.
+Shared data-loop settings live in `RunConfig` as a helper for track
+implementations; dataset-specific fields live in each track module's own config
+dataclass. This keeps track-specific details out of `run_eval.py` without forcing
+unrelated tracks to share one large task config.
+
+`tracks/random_teacher.py` implements the original random-teacher task with
+single-head vanilla self-attention via `torch.nn.MultiheadAttention`.
+`tracks/token_recall.py` implements the synthetic recall tasks with an equivalent
+single-head token-attention classifier using trainable Q/K/V token tables and a
+linear readout.
